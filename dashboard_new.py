@@ -405,98 +405,78 @@ with tab2:
                 st.markdown(recommendation, unsafe_allow_html=True)
 
 # ──────────────────────────────────────────────
-# TAB 3: RATING TRENDS
+# TAB 3: RATING COMPARISON (replaces trends)
 # ──────────────────────────────────────────────
 with tab3:
-    st.markdown("### 📈 Live Rating Trends")
-    st.markdown("Track how IMDb ratings evolve over time. Shows rating changes for the Top 250 movies.")
-    
-    trend_data = load_overall_trend()
-    
-    if not trend_data.empty:
-        st.subheader("📊 Top 250 Average Rating Over Time")
-        fig_trend = go.Figure()
+    st.markdown("### 📊 Rating Comparison")
+    st.markdown("Compare current IMDb ratings across multiple movies. Select titles to view side-by-side ratings and recent changes (if snapshot data is available).")
 
-        fig_trend.add_trace(go.Scatter(
-            x=trend_data["date"],
-            y=trend_data["avg_rating"],
-            mode="lines+markers",
-            name="Average Rating",
-            line=dict(color="#f5c518", width=3),
-            marker=dict(size=8),
-            hovertemplate="<b>%{x|%Y-%m-%d}</b><br>Avg: %{y:.2f}<extra></extra>"
-        ))
+    # Movie selection
+    movie_options = (filtered["title"].dropna().unique().tolist() if len(filtered) > 0 else df["title"].dropna().unique().tolist())
+    default_selection = movie_options[:5]
+    selected_movies = st.multiselect("Select movies to compare (max 10):", movie_options, default=default_selection)
 
-        if "std_rating" in trend_data.columns and len(trend_data) > 1:
-            fig_trend.add_trace(go.Scatter(
-                x=trend_data["date"],
-                y=trend_data["avg_rating"] + trend_data["std_rating"],
-                mode="lines",
-                line=dict(width=0),
-                showlegend=False,
-                hoverinfo="skip"
-            ))
-            fig_trend.add_trace(go.Scatter(
-                x=trend_data["date"],
-                y=trend_data["avg_rating"] - trend_data["std_rating"],
-                mode="lines",
-                line=dict(width=0),
-                fillcolor="rgba(245, 197, 24, 0.2)",
-                fill="tonexty",
-                name="Variance",
-                hoverinfo="skip"
-            ))
+    if not selected_movies:
+        st.info("Select one or more movies from the list to compare their ratings.")
+    else:
+        # Current ratings from the main dataset
+        comp_df = df[df["title"].isin(selected_movies)][["title", "rating", "year", "rank"]].drop_duplicates().set_index("title")
+        comp_df = comp_df.reindex(selected_movies).reset_index()
 
-        fig_trend.update_layout(
-            height=500,
-            hovermode="x unified",
+        # Bar chart comparison
+        fig_comp = px.bar(
+            comp_df,
+            x="rating",
+            y="title",
+            orientation="h",
+            color="rating",
+            color_continuous_scale="Viridis",
+            labels={"rating": "IMDb Rating", "title": "Movie"}
+        )
+        fig_comp.update_layout(
+            height=400,
+            yaxis_title="",
             paper_bgcolor="rgba(0,0,0,0)",
             plot_bgcolor="rgba(0,0,0,0)",
-            margin=dict(l=50, r=50, t=50, b=50)
+            showlegend=False
         )
-        st.plotly_chart(fig_trend, use_container_width=True)
+        st.plotly_chart(fig_comp, use_container_width=True)
 
-        if len(trend_data) > 1:
-            st.info(f"📊 Data from {len(trend_data)} snapshots spanning {(trend_data['date'].max() - trend_data['date'].min()).days} days")
+        # If snapshot data exists, compute change vs previous snapshot
+        all_snap = load_snapshot_data()
+        if not all_snap.empty:
+            try:
+                dates = sorted(pd.to_datetime(all_snap["snapshot_date"]).dropna().unique())
+            except Exception:
+                dates = []
+
+            if len(dates) >= 2:
+                latest = dates[-1]
+                prev = dates[-2]
+
+                pivot = all_snap[all_snap["title"].isin(selected_movies)].pivot_table(
+                    index="title", columns="snapshot_date", values="rating", aggfunc="last"
+                )
+                pivot = pivot.reindex(selected_movies)
+
+                latest_vals = pivot[latest] if latest in pivot.columns else pd.Series([None] * len(pivot), index=pivot.index)
+                prev_vals = pivot[prev] if prev in pivot.columns else pd.Series([None] * len(pivot), index=pivot.index)
+                delta = latest_vals - prev_vals
+
+                compare_table = pd.DataFrame({
+                    "Title": pivot.index,
+                    "Current Rating": [f"{r:.2f}" if pd.notna(r) else "N/A" for r in comp_df["rating"]],
+                    f"Latest ({latest.date()})": [f"{v:.2f}" if pd.notna(v) else "N/A" for v in latest_vals.values],
+                    f"Previous ({prev.date()})": [f"{v:.2f}" if pd.notna(v) else "N/A" for v in prev_vals.values],
+                    "Delta": [f"{d:+.2f}" if pd.notna(d) else "N/A" for d in delta.values]
+                })
+
+                st.subheader("🔁 Recent Snapshot Comparison")
+                st.dataframe(compare_table, use_container_width=True)
+            else:
+                st.info("Not enough dated snapshots to compute deltas. Add dated CSVs in the `data/` folder to enable snapshot comparisons.")
         else:
-            st.info("📈 Only one snapshot is available. Add additional dated CSV snapshots to track rating change over time.")
-    else:
-        st.info("💡 No historical snapshots found. Place dated CSV files in the data folder to enable rating trend charts.")
-    
-    st.divider()
-    
-    # Individual movie trend
-    st.subheader("🎬 Track Individual Movie Ratings")
-    
-    if len(filtered) > 0:
-        selected_movie = st.selectbox(
-            "Select a movie to track:",
-            filtered["title"].head(20).unique()
-        )
-        
-        movie_trend = load_movie_trend(selected_movie)
-        
-        if not movie_trend.empty and len(movie_trend) > 1:
-            fig_movie = px.line(
-                movie_trend,
-                x="snapshot_date",
-                y="rating",
-                markers=True,
-                title=f"Rating History: {selected_movie}",
-                labels={"snapshot_date": "Date", "rating": "Rating"}
-            )
-            fig_movie.update_layout(
-                height=400,
-                hovermode="x",
-                paper_bgcolor="rgba(0,0,0,0)",
-                plot_bgcolor="rgba(0,0,0,0)"
-            )
-            st.plotly_chart(fig_movie, use_container_width=True)
-        else:
-            movie_current = filtered[filtered["title"].str.contains(selected_movie, case=False, na=False)]
-            if not movie_current.empty:
-                st.info(f"Current rating for {selected_movie}: {movie_current.iloc[0]['rating']}/10")
-            st.info("Add additional dated CSV snapshots in the data folder to track movie rating changes over time.")
+            st.info("No historical snapshot data available. Add dated CSVs in the `data/` folder to enable snapshot comparisons.")
 
 # ──────────────────────────────────────────────
 # TAB 4: DIRECTOR HALL OF FAME
